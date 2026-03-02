@@ -19,6 +19,7 @@ rosbags = "^0.11.0"
 click = "^8.3.1"
 opencv-python = "^4.13.0.92"
 av = "^16.1.0"
+textual = "^8.0.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.4.2"
@@ -35,3 +36,4 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry.scripts]
 "mosaico.ros_injector" = "mosaicolabs.ros_bridge.injector:ros_injector"
 "mosaico.testing" = "testing.testing:mosaico_testing"
+"mosaico_catalog" = "mosaicolabs.tui.cli:main"
