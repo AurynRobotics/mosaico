@@ -6,11 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
-- Added optional Arrow IPC body buffer compression on outbound DoGet streams,
-  selected by the `MOSAICOD_FLIGHT_IPC_COMPRESSION` environment variable
-  (`none` default, `lz4`, or `zstd`). Column-aware and complementary to the
-  gRPC-channel GZIP enabled by `--gzip`. Backward compatible: any Arrow Flight
-  client with the matching codec linked decodes transparently.
+- Added Arrow IPC body buffer compression on outbound DoGet streams, selected
+  by `MOSAICOD_FLIGHT_IPC_COMPRESSION` (`lz4` default, `none`, or `zstd`).
+  Column-aware and complementary to the gRPC-channel GZIP enabled by `--gzip`.
+  Any Arrow Flight client with the matching codec linked decodes transparently
+  (pyarrow >= 12, arrow-cpp >= 12 with LZ4/ZSTD). Set to `none` to restore the
+  previous uncompressed-wire behavior.
 
 
 ## [0.3.0] - 2026-30-03
