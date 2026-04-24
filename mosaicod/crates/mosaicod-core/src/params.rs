@@ -206,6 +206,39 @@ pub struct Params {
     pub store_bucket: Param<String>,
     pub store_secret_key: Param<String, Hidden>,
     pub store_access_key: Param<String>,
+
+    /// Arrow IPC body buffer compression algorithm applied to outbound DoGet
+    /// streams. Operates inside the Arrow IPC frame and is column-aware,
+    /// unlike the gRPC-level GZIP enabled by `--gzip` which sees the frame as
+    /// an opaque blob; the two layers can be combined.
+    ///
+    /// Defaults to `IpcCompression::None` (no behavior change).
+    pub flight_ipc_compression: Param<IpcCompression>,
+}
+
+/// Arrow IPC body buffer compression codec selected by
+/// `MOSAICOD_FLIGHT_IPC_COMPRESSION`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IpcCompression {
+    #[default]
+    None,
+    Lz4,
+    Zstd,
+}
+
+impl FromStr for IpcCompression {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "none" | "off" | "disabled" => Ok(Self::None),
+            "lz4" | "lz4_frame" => Ok(Self::Lz4),
+            "zstd" => Ok(Self::Zstd),
+            other => Err(format!(
+                "invalid value '{}' for MOSAICOD_FLIGHT_IPC_COMPRESSION (expected one of: none, lz4, zstd)",
+                other
+            )),
+        }
+    }
 }
 
 /// Options for loading parameters from environment variables
@@ -269,6 +302,12 @@ pub fn load_params_from_env(config: ParamsLoadOptions) -> error::PublicResult<()
         store_bucket: Param::optional("MOSAICOD_STORE_BUCKET", "".to_owned()),
         store_secret_key: Param::optional("MOSAICOD_STORE_SECRET_KEY", "".to_owned()),
         store_access_key: Param::optional("MOSAICOD_STORE_ACCESS_KEY", "".to_owned()),
+
+        // flight wire encoding
+        flight_ipc_compression: Param::optional(
+            "MOSAICOD_FLIGHT_IPC_COMPRESSION",
+            IpcCompression::None,
+        ),
     };
 
     let _ = ENV.set(ev);

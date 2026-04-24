@@ -1,4 +1,6 @@
 use crate::error::Result;
+use arrow::ipc::CompressionType;
+use arrow::ipc::writer::IpcWriteOptions;
 use arrow_flight::{
     Ticket,
     encode::{FlightDataEncoder, FlightDataEncoderBuilder},
@@ -7,6 +9,7 @@ use arrow_flight::{
 use futures::TryStreamExt;
 use log::{debug, info, trace};
 use mosaicod_core as core;
+use mosaicod_core::params::{self, IpcCompression};
 use mosaicod_core::types;
 use mosaicod_facade as facade;
 use mosaicod_marshal as marshal;
@@ -62,7 +65,34 @@ pub async fn do_get(ctx: &facade::Context, ticket: Ticket) -> Result<FlightDataE
     // Convert the data stream to a flight stream casting the returned error
     let stream = stream.map_err(|e| FlightError::ExternalError(Box::new(e)));
 
+    let write_options = build_ipc_write_options(params::params().flight_ipc_compression.value)?;
+
     Ok(FlightDataEncoderBuilder::new()
         .with_schema(schema)
+        .with_options(write_options)
         .build(stream))
+}
+
+/// Build `IpcWriteOptions` honoring the configured `MOSAICOD_FLIGHT_IPC_COMPRESSION`.
+/// Returns the default options unchanged when the codec is `None`, so existing
+/// clients see no behavior change unless the operator opts in.
+fn build_ipc_write_options(codec: IpcCompression) -> Result<IpcWriteOptions> {
+    let opts = IpcWriteOptions::default();
+    let arrow_codec = match codec {
+        IpcCompression::None => return Ok(opts),
+        IpcCompression::Lz4 => CompressionType::LZ4_FRAME,
+        IpcCompression::Zstd => CompressionType::ZSTD,
+    };
+    info!(
+        "flight DoGet stream using IPC body compression: {:?}",
+        codec
+    );
+    opts.try_with_compression(Some(arrow_codec)).map_err(|e| {
+        core::error::Error::internal(Some(format!(
+            "failed to enable Arrow IPC compression {:?}: {} \
+             (build the `arrow` crate with the `ipc_compression` feature)",
+            codec, e
+        )))
+        .into()
+    })
 }
