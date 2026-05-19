@@ -2644,9 +2644,11 @@ dependencies = [
  "arrow",
  "arrow-cast",
  "arrow-schema",
+ "futures",
  "mosaicod-core",
  "parquet",
  "thiserror",
+ "tokio",
  "tonic",
 ]
 
