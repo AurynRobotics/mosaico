@@ -323,6 +323,30 @@ impl TryFrom<bytes::Bytes> for TopicAppMetadata {
 }
 
 // ////////////////////////////////////////////////////////////////////////////
+// Filter
+// ////////////////////////////////////////////////////////////////////////////
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FilterTimestampRange {
+    /// Lower bound of the window: messages with timestamp less than start_ns are ignored.
+    start_ns: u64,
+    /// Upper bound of the window: messages with timestamp greater than end_ns are ignored.
+    end_ns: u64,
+}
+
+impl FilterTimestampRange {
+    pub fn validate(&self) -> Result<(), mosaicod_core::Error> {
+        if self.start_ns >= self.end_ns {
+            return Err(mosaicod_core::Error::bad_request(format!(
+                "invalid timestamp range: start_ns ({}) must be < end_ns ({})",
+                self.start_ns, self.end_ns
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+// ////////////////////////////////////////////////////////////////////////////
 // TESTS
 // ////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
