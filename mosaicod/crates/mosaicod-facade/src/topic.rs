@@ -1,5 +1,6 @@
 use super::{Context, Error, session};
 use arrow::datatypes::SchemaRef;
+
 use log::{trace, warn};
 use mosaicod_core::types::TopicMetadataProperties;
 use mosaicod_core::{self as core, error::PublicResult as Result, params, types};

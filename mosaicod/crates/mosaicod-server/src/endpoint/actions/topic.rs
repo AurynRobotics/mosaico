@@ -3,18 +3,21 @@ use crate::{
     error::{Error, Result},
     flight::DoActionStream,
 };
+use arrow::error::ArrowError;
+use datafusion::physical_plan::SendableRecordBatchStream;
+use futures::StreamExt;
 use log::{info, trace, warn};
 use mosaicod_core::{
     self as core,
     types::{self, MetadataBlob},
 };
+use mosaicod_ext;
 use mosaicod_facade::{self as facade};
 use mosaicod_marshal::{
     self as marshal, ActionResponse, ClusterTimestampRange, Ontology, flight::FilterTimestampRange,
     responses,
 };
-use std::time::Duration;
-
+use mosaicod_query as query;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -128,19 +131,60 @@ pub async fn notification_purge(ctx: &facade::Context, locator: String) -> Resul
     Ok(ActionResponse::topic_notification_purge())
 }
 
+/// Builds a filtered streaming query over a topic.
+///
+/// Reads the topic's Parquet data with the provided ontology_filter and
+/// optional ts window applied as predicate pushdown, returning a lazy
+/// SendableRecordBatchStream of matching record batches.
+pub async fn query_by_timestamp(
+    context: &facade::Context,
+    handle: &facade::topic::Handle,
+    ts: Option<types::TimestampRange>,
+    ontology_filter: query::OntologyFilter,
+) -> Result<SendableRecordBatchStream> {
+    let meta = facade::topic::metadata(context, handle).await?;
+    let format = meta.ontology_metadata.properties.serialization_format;
+    let batch_size = facade::topic::compute_optimal_batch_size(context, handle)
+        .await
+        .ok();
+
+    let path_in_store = handle
+        .path_in_store()
+        .ok_or(facade::Error::MissingDbData(handle.locator().to_string()))?;
+
+    let mut result = context
+        .timeseries_querier
+        .read(path_in_store.data_folder_path(), format, batch_size)
+        .await?;
+
+    if let Some(ts_range) = ts {
+        result = result.filter_by_timestamp_range(ts_range)?;
+    }
+
+    result = result.filter(ontology_filter.into_expr_group())?;
+
+    Ok(result.stream().await?)
+}
+
 pub async fn filter_clusterize(
-    _ctx: &facade::Context,
+    ctx: &facade::Context,
     locator: String,
-    _clustering_dt_ns: u64,
+    clustering_dt_ns: u64,
     ontology: Ontology,
     timestamp_range: Option<FilterTimestampRange>,
 ) -> Result<DoActionStream> {
     info!("filter clusterize for {}", locator);
 
-    if let Some(ts) = &timestamp_range {
-        ts.validate()?;
-    }
+    // 1. Validation and conversion to TimestampRange
+    let ts: Option<types::TimestampRange> = match timestamp_range.as_ref() {
+        Some(ftr) => {
+            ftr.validate()?;
+            Some(ftr.into())
+        }
+        None => None,
+    };
 
+    // 2. Check ontology parameter
     if ontology.len() > 1 || ontology.is_empty() {
         return Err(core::Error::bad_request(format!(
             "Only 1 filtering condition is allowed, found {}",
@@ -148,42 +192,66 @@ pub async fn filter_clusterize(
         )))?;
     }
 
-    let (tx, rx) = mpsc::channel::<std::result::Result<arrow_flight::Result, tonic::Status>>(
-        MAX_BUFFER_CHANNEL_SIZE,
-    );
+    // 3. Check clustering_dt_ns
+    let dt_ns = if clustering_dt_ns == 0 {
+        u64::MAX
+    } else {
+        clustering_dt_ns
+    };
+
+    // 4. Setup query
+    let topic_locator = locator.parse::<types::TopicLocator>()?;
+    let topic_handle = facade::topic::Handle::try_from_locator(ctx, topic_locator).await?;
+    let timestamp_column = core::params::ARROW_SCHEMA_COLUMN_NAME_INDEX_TIMESTAMP.to_owned();
+    let ontology_filter = ontology.try_into()?;
+
+    // 5. RecordBatch stram filtered by timestamp if any and ontology
+    let batch_stream = query_by_timestamp(ctx, &topic_handle, ts, ontology_filter)
+        .await?
+        .map(|item| item.map_err(|e| ArrowError::ExternalError(Box::new(e))));
+
+    // 6. Channel setup
+    let (tx, rx) = mpsc::channel::<
+        std::result::Result<
+            mosaicod_ext::arrow_filter::Cluster,
+            mosaicod_ext::arrow_filter::ClusteringError,
+        >,
+    >(MAX_BUFFER_CHANNEL_SIZE);
 
     tokio::spawn(async move {
-        for id in 0u64..10 {
-            let res = responses::TopicFilterClusterize {
-                ts: ClusterTimestampRange {
-                    start_ns: id * 10,
-                    end_ns: id * 10 + 5,
-                },
-                id,
-            };
-
-            let bytes = match ActionResponse::topic_filter_clusterize(res).bytes() {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = tx.send(Err(tonic::Status::internal(e.to_string()))).await;
-                    return;
-                }
-            };
-
-            let mut payload = bytes.to_vec();
-            payload.push(b'\n');
-
-            if tx
-                .send(Ok(arrow_flight::Result::new(payload)))
-                .await
-                .is_err()
-            {
-                warn!("client disconnected, aborting clusterize stream");
-                return;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
+        let _ = mosaicod_ext::arrow_filter::topic_filter_clusterize(
+            batch_stream,
+            dt_ns,
+            &timestamp_column,
+            tx,
+        )
+        .await;
     });
 
-    Ok(Box::pin(ReceiverStream::new(rx)))
+    let stream = ReceiverStream::new(rx).map(|res| match res {
+        Ok(cluster) => cluster_to_flight_result(cluster),
+        Err(e) => Err(e.to_status()),
+    });
+
+    Ok(Box::pin(stream))
+}
+
+fn cluster_to_flight_result(
+    cluster: mosaicod_ext::arrow_filter::Cluster,
+) -> std::result::Result<arrow_flight::Result, tonic::Status> {
+    let res = responses::TopicFilterClusterize {
+        ts: ClusterTimestampRange {
+            start_ns: cluster.start_ns,
+            end_ns: cluster.end_ns,
+        },
+        id: cluster.id,
+    };
+
+    let bytes = ActionResponse::topic_filter_clusterize(res)
+        .bytes()
+        .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+    let mut payload = bytes.to_vec();
+    payload.push(b'\n');
+    Ok(arrow_flight::Result::new(payload))
 }
