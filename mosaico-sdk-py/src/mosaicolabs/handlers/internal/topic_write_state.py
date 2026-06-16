@@ -104,6 +104,11 @@ class _TopicWriteState:
                 f"Ontology class for tag '{ontology_tag}' not registered in Message."
             )
 
+        # The Arrow schema is invariant for a topic's ontology, so resolve it once
+        # here instead of rebuilding it inside _get_record_batch on every batch
+        # (and, in byte/Image mode, on every single message).
+        self._schema = Message._get_schema(self.ontology_type)
+
         if self.max_batch_size_bytes is None or self.max_batch_size_records is None:
             raise RuntimeError(
                 "'max_batch_size_bytes' AND 'max_batch_size_records' must be provided."
@@ -126,7 +131,7 @@ class _TopicWriteState:
 
         return pa.RecordBatch.from_pydict(
             _encode_messages(msgs),
-            schema=Message._get_schema(self.ontology_type),
+            schema=self._schema,
         )
 
     def _get_serialized_size(self, batch: pa.RecordBatch) -> int:
